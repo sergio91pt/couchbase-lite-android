@@ -11,8 +11,14 @@ import com.squareup.okhttp.mockwebserver.MockWebServer;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -309,5 +315,47 @@ public class DatabaseTest extends LiteTestCase {
             }
         }));
         assertTrue(latch.await(0, TimeUnit.SECONDS));
+    }
+
+    private static String getCurrentRevIdFromAnotherThread(final Database db, final String docId)
+            throws ExecutionException, TimeoutException {
+
+        ExecutorService service = Executors.newSingleThreadExecutor();
+        Future<String> future = service.submit(new Callable<String>() {
+            @Override
+            public String call() throws Exception {
+                Document doc = db.getDocument(docId);
+                return doc.getCurrentRevision().getId();
+            }
+        });
+        service.shutdown();
+
+        for (;;) {
+            try {
+                return future.get(15, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                // continue
+            }
+        }
+    }
+
+    public void testTransactionIsLocal() throws CouchbaseLiteException, ExecutionException, TimeoutException {
+        Document doc = database.createDocument();
+        String docId = doc.getId();
+        String revId =  doc.createRevision().save().getId();
+        assertNotNull(docId);
+        assertNotNull(revId);
+
+        database.beginTransaction();
+
+        UnsavedRevision rev = doc.createRevision();
+        rev.getProperties().put("count", 1);
+        String newRevId = rev.save().getId();
+        assertNotSame(revId, newRevId);
+
+        assertEquals(revId, getCurrentRevIdFromAnotherThread(database, docId));
+        database.endTransaction(true);
+
+        assertEquals(newRevId, getCurrentRevIdFromAnotherThread(database, docId));
     }
 }
